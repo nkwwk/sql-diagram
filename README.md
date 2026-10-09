@@ -1,57 +1,130 @@
 # SQL Diagram
 
-Import one or more `.sql` files (schema scripts or full database dumps) and get diagrams of their tables, fields and relationships. Everything is parsed locally in the browser.
+[![CI & Pages](https://github.com/nkwwk/sql-diagram/actions/workflows/ci.yml/badge.svg)](https://github.com/nkwwk/sql-diagram/actions/workflows/ci.yml)
 
-- **Multiple files** are merged into one schema: foreign keys may point across files, and file order doesn't matter (all `CREATE TABLE`s are applied before `ALTER TABLE`s). Add, remove or paste extra files at any time.
-- **Large dumps** are streamed in a Web Worker. A small state machine (`src/sql/scanner.ts`) skips `INSERT` statements and `COPY … FROM stdin` data without copying it, so memory stays flat and the UI stays responsive (roughly 150–200 MB/s on a laptop; a 300 MB dump takes about 1.5 s).
-- **Compressed files and archives** are extracted in the browser, streaming, with no upload: `.gz` (including multi-member files from pigz/bgzip), `.bz2` (including pbzip2 output), `.xz`, `.zst`, `.zip` (stored, deflate, bzip2, zstd and xz entries; ZIP64) and `.tar` / `.tar.gz` / `.tgz` etc. Formats are detected from the file's magic bytes, layers nest (a `.sql.gz` inside a `.zip`), and only `.sql`-like entries inside archives are read. Password-protected zips (ZipCrypto from `zip -P`, and WinZip AES-128/192/256) prompt for the password; a password that works is reused for the rest of the import, and schemas from protected files are never saved to `localStorage`. 7-Zip, RAR, PostgreSQL custom-format and SQLite database files are recognised and explained.
-- The extracted DDL (not the raw dump) is remembered in `localStorage`, so a reload restores the diagram.
+Turn `.sql` files into ER diagrams, relationship lists and a data dictionary — right in your browser.
 
-## Views
+**[Open the app →](https://nkwwk.github.io/sql-diagram/)**
 
-| Tab | What it shows |
+- Works with schema scripts **and** full database dumps, even multi-GB ones
+- Reads compressed files and archives (`.gz`, `.zip`, `.tar.gz`, `.bz2`, `.xz`, `.zst`)
+- MySQL / MariaDB, PostgreSQL, SQL Server and SQLite
+- Nothing is uploaded: files are parsed locally, on desktop or phone
+
+## How to use it
+
+1. **Open** one or more files — click **Open .sql files**, drag them onto the page, or **Paste SQL**.
+   No file handy? Click **Load sample**.
+2. **Explore** the tabs:
+
+   | Tab | What you get |
+   |---|---|
+   | **ER diagram** | Interactive diagram: drag tables, zoom, search, switch layout. Click a table to highlight its relationships and see its columns. Export as PNG. |
+   | **Crow's foot** | Classic ER notation. Solid lines = the foreign key is part of the primary key. Export as SVG. |
+   | **UML class** | Tables as classes, columns as attributes, foreign keys as associations. |
+   | **Dependency graph** | Which table references which, at a glance. |
+   | **Relationships** | Every foreign key with its type (1:1 or N:1), whether it's optional, and ON DELETE / ON UPDATE rules. Also many-to-many links through junction tables. |
+   | **Data dictionary** | Every column with type, keys, nullability, default, reference and comment. Export as Markdown. |
+
+3. **Add more files** at any time. Tables from all files are merged into one schema, and foreign keys can point across files — the order you add them in doesn't matter.
+
+Problems — like a foreign key to a table that isn't in any file — appear under the **warnings** badge in the header.
+
+## Supported files
+
+### SQL dialects
+
+| Dialect | Notes |
 |---|---|
-| **ER diagram** | Interactive ERD (drag, zoom, auto-layout, find a table, click to highlight its relationships, PNG export). Crow's foot markers on every FK. |
-| **Crow's foot** | Static Mermaid ER diagram. Solid = identifying, dashed = non-identifying. SVG export. |
-| **UML class** | Tables as classes, columns as attributes, FKs as associations/compositions. |
-| **Dependency graph** | Table-level "who references whom" graph; link tables shown as hexagons. |
-| **Relationships** | Every FK with cardinality (1:1 / N:1), optionality, ON DELETE/UPDATE; detected many-to-many link tables; per-table connectivity. |
-| **Data dictionary** | All fields with type, PK/FK/UQ/auto, nullability, default, reference and comment. Markdown export. |
+| MySQL / MariaDB | `mysqldump` output, backticks, `AUTO_INCREMENT`, `COMMENT '…'`, `DELIMITER` blocks |
+| PostgreSQL | `pg_dump` output, schemas, `ALTER TABLE ONLY …`, `COPY … FROM stdin`, `COMMENT ON`, `$$` function bodies |
+| SQL Server | SSMS scripts, `[bracketed]` names, `GO` batches, `IDENTITY` |
+| SQLite | `.dump` output |
 
-## Supported SQL
+The app reads table structure — `CREATE TABLE`, `ALTER TABLE`, `CREATE UNIQUE INDEX` and comments. Everything else (inserts, views, functions…) is skipped quickly, so data-heavy dumps are fine. UTF-8 and UTF-16 files both work.
 
-A tolerant DDL parser (`src/sql/parser.ts`) understands MySQL/MariaDB, PostgreSQL (incl. `pg_dump`), SQL Server (incl. `GO` batches and `[bracket]` names) and SQLite:
+### Compressed files and archives
 
-- `CREATE TABLE` with inline or table-level `PRIMARY KEY`, `UNIQUE`, `REFERENCES`, `FOREIGN KEY`
-- `ALTER TABLE … ADD CONSTRAINT / ADD COLUMN / MODIFY / ALTER COLUMN`
-- `CREATE UNIQUE INDEX`, `COMMENT ON TABLE/COLUMN`, MySQL `COMMENT '…'`
+| Format | Notes |
+|---|---|
+| `.gz` | Including multi-part files from `pigz` / `bgzip` |
+| `.bz2` | Including `pbzip2` output |
+| `.xz`, `.zst` | |
+| `.zip` | Including large (ZIP64) archives. **Password-protected zips prompt for the password.** |
+| `.tar`, `.tar.gz`, `.tgz`, … | |
 
-Other statements (inserts, functions, views, …) are skipped. The scanner understands `'…'`/`"…"`/`` `…` ``/`[…]` quoting with doubled-quote and backslash escapes (backslashes are treated literally for PostgreSQL `standard_conforming_strings`, SQL Server and SQLite), `E'…'` and `$tag$…$tag$` strings, `--`/`#`/`/* */` comments, `GO` batches, `DELIMITER` and `COPY` blocks, and UTF-8 / UTF-16 files (with or without BOM). Anything that couldn't be resolved shows up under the warnings chip.
+- Formats are recognised from the file contents, not the name, and can be nested (e.g. a `.sql.gz` inside a `.zip`).
+- Inside archives, only `.sql`-type files are read; other files are skipped with a note.
+- 7-Zip, RAR, PostgreSQL custom-format dumps and SQLite database files aren't supported, but the app tells you how to convert them (e.g. `pg_restore -f out.sql`).
+
+## Privacy
+
+- Files never leave your device; all parsing happens in your browser.
+- To restore your diagram after a reload, the app keeps only the extracted table definitions (not the data) in your browser's local storage. **Clear** removes them.
+- Passwords are never stored, and schemas from password-protected files are not saved for the next visit.
+
+## Performance
+
+| Task | Typical time (laptop) |
+|---|---|
+| Parse a 300 MB dump full of `INSERT`s | ~1.5 s |
+| Decompress and parse 150 MB of gzipped SQL | ~1.2 s |
+| Drag a table in a 500-table diagram | 2–7 ms per frame |
+
+Large files are read as a stream in a background worker, so memory stays low and the page stays responsive.
+
+---
 
 ## Development
+
+Requires Node.js 20.19+ (22 recommended).
 
 ```bash
 npm install
 npm run dev
 ```
 
-| Command | |
+| Command | Purpose |
 |---|---|
-| `npm test` | All tests (Vitest): generic dialect tests, edge cases, performance budgets |
-| `npm run test:perf` | Performance tests only, printing throughput |
-| `npm run typecheck` | Type-check app and tests |
-| `npm run lint` | oxlint |
+| `npm run dev` | Start the dev server |
+| `npm test` | Run all tests (Vitest) |
+| `npm run test:perf` | Run only the performance tests, printing timings |
+| `npm run typecheck` | Type-check the app and tests |
+| `npm run lint` | Lint with oxlint |
 | `npm run build` | Type-check and build to `dist/` |
 
-Tests live in `tests/`:
+### Project layout
 
-- `generic.test.ts` — realistic MySQL, pg_dump, SQL Server and SQLite dumps; multi-file merging; diagram generators; layout.
-- `edge.test.ts` — empty input, unterminated strings, semicolons/comment markers inside strings and identifiers, escape rules per dialect, dollar quoting, COPY, DELIMITER, GO, CRLF, encodings, and identical results for every chunk size (1 byte up).
-- `archive.test.ts` — every compression and archive format (committed fixtures in `tests/fixtures/archives/`), multi-member gzip, multi-stream bzip2, ZIP64, nested layers, byte-at-a-time streaming, truncated/corrupt/unsupported files, the bzip2 decoder against the `bzip2` tool, and ~10 MB compressed dumps.
-- `perf.test.ts` — 40 MB INSERT and COPY dumps, a 30 MB string literal, quadratic-trap inputs, 3,000-table schemas and a 400-table layout. Budgets are generous so they hold on CI; set `PERF_SCALE=5` to run with 5× bigger inputs.
+```
+src/
+  sql/
+    scanner.ts         streaming statement splitter (skips INSERT/COPY data)
+    parser.ts          DDL parser → tables, columns, relationships
+    import.ts          reads files: decompression, encodings, per-file reports
+    import.worker.ts   runs imports off the main thread
+    archive/           gzip / bzip2 / xz / zstd / zip / tar readers, zip decryption
+  erd/                 interactive ER diagram (React Flow + dagre layout)
+  diagrams/mermaid.ts  crow's foot, UML class and dependency graph generators
+  views/               Mermaid, relationships, data dictionary and files views
+  components/          menus and the password dialog
+tests/                 Vitest suites and archive fixtures
+```
+
+### Tests
+
+| File | Covers |
+|---|---|
+| `generic.test.ts` | Realistic dumps for each dialect, multi-file merging, diagram generators, layout |
+| `edge.test.ts` | Tricky quoting and comments, escape rules per dialect, `GO` / `DELIMITER` / `COPY`, encodings, identical results at every chunk size |
+| `archive.test.ts` | Every compression and archive format, nesting, password-protected zips, truncated and corrupt files |
+| `perf.test.ts` | Large dumps, worst-case inputs, 3,000-table schemas. Set `PERF_SCALE=5` for 5× bigger inputs |
+
+Some archive tests use the `bzip2`, `xz` and `zstd` command-line tools when they're installed, and are skipped otherwise.
 
 ## Deployment
 
-`.github/workflows/ci.yml` runs lint, type-check, tests and a build on every push and pull request. Pushes to `main` are then published to GitHub Pages.
+Every push and pull request runs lint, type-check, tests and a build in GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Pushes to `main` are then published to GitHub Pages.
 
-One-time setup: in the repository on GitHub, open **Settings → Pages** and set **Source** to **GitHub Actions**. The build sets Vite's `base` from `BASE_PATH`, which the workflow takes from `actions/configure-pages`, so it works for both `https://<user>.github.io/<repo>/` and a custom domain.
+**One-time setup:** on GitHub, open **Settings → Pages** and set **Source** to **GitHub Actions**.
+
+The workflow sets the site's base path automatically, so it works both at `https://<user>.github.io/<repo>/` and on a custom domain.
