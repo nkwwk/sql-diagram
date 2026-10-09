@@ -11,6 +11,8 @@ export interface FileReport extends ScanStats {
   /** Parse time in milliseconds. */
   ms: number
   encoding: string
+  /** Set when the file was skipped (e.g. it is not a text file). */
+  skipped?: string
 }
 
 export interface ImportProgress {
@@ -36,6 +38,16 @@ function detectEncoding(head: Uint8Array): string {
   return 'utf-8'
 }
 
+/** Returns a reason when the first bytes show the file is not SQL text. */
+function binaryReason(head: Uint8Array, encoding: string): string | null {
+  if (head[0] === 0x1f && head[1] === 0x8b) return 'it is gzip-compressed; extract the .sql file first'
+  if (head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04) return 'it is a zip archive; extract the .sql file first'
+  if (encoding !== 'utf-8') return null
+  const n = Math.min(head.length, 4096)
+  for (let i = 0; i < n; i++) if (head[i] === 0) return 'it is not a text file'
+  return null
+}
+
 /**
  * Stream one or more SQL files through the scanner and build a single schema.
  * Only DDL text is retained, so memory stays flat regardless of how much
@@ -45,6 +57,7 @@ export async function importFiles(files: Blob[], onProgress?: (p: ImportProgress
   const builder = new SchemaBuilder()
   const reports: FileReport[] = []
   const ddl: string[] = []
+  const skipWarnings: string[] = []
 
   for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
     const file = files[fileIndex]
@@ -62,11 +75,18 @@ export async function importFiles(files: Blob[], onProgress?: (p: ImportProgress
     let decoder: TextDecoder | null = null
     let encoding = 'utf-8'
     let loaded = 0
+    let skipped: string | undefined
     for (;;) {
       const { value, done } = await reader.read()
       if (done) break
       if (!decoder) {
         encoding = detectEncoding(value)
+        const reason = binaryReason(value, encoding)
+        if (reason) {
+          skipped = reason
+          await reader.cancel()
+          break
+        }
         decoder = new TextDecoder(encoding)
       }
       loaded += value.byteLength
@@ -76,9 +96,12 @@ export async function importFiles(files: Blob[], onProgress?: (p: ImportProgress
     if (decoder) scanner.push(decoder.decode())
     scanner.end()
 
-    reports.push({ name, size: file.size, tables, ms: performance.now() - started, encoding, ...scanner.stats })
+    if (skipped) skipWarnings.push(`Skipped "${name}": ${skipped}.`)
+    reports.push({ name, size: file.size, tables, ms: performance.now() - started, encoding, skipped, ...scanner.stats })
     ddl.push(kept.join(';\n\n') + (kept.length ? ';\n' : ''))
   }
 
-  return { schema: builder.build(), files: reports, ddl }
+  const schema = builder.build()
+  schema.warnings.unshift(...skipWarnings)
+  return { schema, files: reports, ddl }
 }

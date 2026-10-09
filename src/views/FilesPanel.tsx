@@ -32,7 +32,8 @@ export default function FilesPanel({ files, reports, onRemove, onAdd }: Props) {
                 <tr key={`${f.name}:${f.size}:${f.lastModified}:${i}`}>
                   <td className="mono strong">
                     {f.name}
-                    {r && r.encoding !== 'utf-8' && <span className="pill pill--soft">{r.encoding}</span>}
+                    {r && !r.skipped && r.encoding !== 'utf-8' && <span className="pill pill--soft">{r.encoding}</span>}
+                    {r?.skipped && <span className="pill pill--warn" title={r.skipped}>skipped</span>}
                   </td>
                   <td className="num">{formatBytes(f.size)}</td>
                   <td className="num">{r ? formatCount(r.tables) : '…'}</td>

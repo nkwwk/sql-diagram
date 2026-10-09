@@ -21,7 +21,8 @@ const TABS = [
 type TabId = (typeof TABS)[number]['id']
 type Panel = 'files' | 'warnings' | null
 
-const ACCEPT = '.sql,.ddl,.txt,.dump,text/plain,application/sql'
+// No `accept` filter on the file inputs: mobile browsers map extensions to MIME types, and
+// `.sql` has none on Android, so a filter greys those files out. Binary files are rejected on import.
 let pasteCount = 0
 
 export default function App() {
@@ -126,7 +127,6 @@ export default function App() {
             ref={openInput}
             type="file"
             multiple
-            accept={ACCEPT}
             hidden
             onChange={(e) => {
               const list = Array.from(e.target.files ?? [])
@@ -138,7 +138,6 @@ export default function App() {
             ref={addInput}
             type="file"
             multiple
-            accept={ACCEPT}
             hidden
             onChange={(e) => {
               addFiles(Array.from(e.target.files ?? []))

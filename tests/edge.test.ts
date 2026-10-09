@@ -206,6 +206,22 @@ describe('encodings', () => {
   })
 })
 
+describe('non-SQL files', () => {
+  it.each([
+    ['png image', [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d], 'not a text file'],
+    ['gzip archive', [0x1f, 0x8b, 0x08, 0, 0, 0], 'gzip-compressed'],
+    ['zip archive', [0x50, 0x4b, 0x03, 0x04, 0x14, 0], 'zip archive'],
+  ])('skips a %s with a warning and still imports the other files', async (_, bytes, reason) => {
+    const { schema, files } = await importFiles([
+      new File([new Uint8Array(bytes)], 'not-sql.bin'),
+      new File(['CREATE TABLE a (id int);'], 'a.sql'),
+    ])
+    expect(schema.tables.map((t) => t.id)).toEqual(['a'])
+    expect(files[0].skipped).toContain(reason)
+    expect(schema.warnings[0]).toContain('Skipped "not-sql.bin"')
+  })
+})
+
 describe('relationship edge cases', () => {
   it('warns about foreign keys to unknown tables', () => {
     const s = parseSql('CREATE TABLE a (id int, b_id int REFERENCES missing(id));')

@@ -797,6 +797,10 @@ table.grid .arrow {
   background: var(--fk-bg);
   color: var(--fk);
 }
+.pill--warn {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
 .pill--soft {
   background: var(--surface-2);
   color: var(--text-2);
