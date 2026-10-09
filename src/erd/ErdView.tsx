@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
   BackgroundVariant,
+  ConnectionMode,
   Controls,
   MiniMap,
   Panel,
@@ -10,8 +11,6 @@ import {
   ViewportPortal,
   getNodesBounds,
   getViewportForBounds,
-  useNodesInitialized,
-  useNodesState,
   useReactFlow,
   type Edge,
 } from '@xyflow/react'
@@ -19,13 +18,26 @@ import { toPng } from 'html-to-image'
 import '@xyflow/react/dist/style.css'
 import type { Schema } from '../sql/types'
 import TableNode from './TableNode'
-import { layoutSchema, type Direction, type TableNodeType } from './layout'
+import { layoutBounds, layoutSchema, type Direction, type TableNodeType } from './layout'
 import { downloadDataUrl } from '../util/download'
 import { useIsNarrow } from '../util/useMediaQuery'
 import Menu from '../components/Menu'
 import TableDetails from './TableDetails'
 
 const nodeTypes = { table: TableNode }
+const NO_NODES: TableNodeType[] = []
+
+/** Above this many tables, trade visual extras (minimap, shadows, transitions) for smooth dragging. */
+const LARGE_DIAGRAM = 150
+
+function geometry(nodes: TableNodeType[]) {
+  return new Map(
+    nodes.map((n) => {
+      const w = n.measured?.width ?? (n.style?.width as number) ?? 240
+      return [n.id, { cx: n.position.x + w / 2, w }]
+    }),
+  )
+}
 
 function Markers() {
   const defs = (suffix: string) => (
@@ -61,31 +73,58 @@ function ErdCanvas({ schema, fileName }: Props) {
   const narrow = useIsNarrow()
   // Portrait phones fit a top-to-bottom layout much better.
   const [direction, setDirection] = useState<Direction>(() => (narrow ? 'TB' : 'LR'))
-  const [nodes, setNodes, onNodesChange] = useNodesState<TableNodeType>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [showLabels, setShowLabels] = useState(false)
   const [query, setQuery] = useState('')
-  const { fitView, setCenter, getNodes } = useReactFlow<TableNodeType, Edge>()
+  // Nodes are owned by React Flow (uncontrolled): routing every drag frame through React state
+  // and back into the store re-processes every node and re-runs every handle's subscription.
+  const { setNodes, setViewport, setCenter, getNodes } = useReactFlow<TableNodeType, Edge>()
+  const container = useRef<HTMLDivElement>(null)
+  const large = schema.tables.length > LARGE_DIAGRAM
+  /**
+   * Node centres used to pick which side each edge attaches to. Updated only after a layout or
+   * when a drag ends — deriving it from live positions would rebuild every edge on every drag frame.
+   */
+  const [geo, setGeo] = useState<Map<string, { cx: number; w: number }>>(() => new Map())
 
-  // Fit once React Flow has measured the freshly laid-out nodes; fitting earlier is unreliable.
-  const pendingFit = useRef(false)
-  const nodesInitialized = useNodesInitialized()
-  useEffect(() => {
-    if (!nodesInitialized || !pendingFit.current) return
-    pendingFit.current = false
-    fitView({ padding: 0.08, maxZoom: 1, duration: 250 })
-  }, [nodesInitialized, fitView])
+  // Fit from the layout's own geometry: with viewport culling, off-screen nodes are never
+  // measured, so waiting for React Flow's measurements would never finish on large schemas.
+  // Before React Flow's pan/zoom is ready, viewport changes are dropped; queue the fit until onInit.
+  const ready = useRef(false)
+  const pendingFit = useRef<TableNodeType[] | null>(null)
+  const fitTo = useCallback(
+    (laid: TableNodeType[], animate = true) => {
+      const el = container.current
+      if (!ready.current || !el) {
+        pendingFit.current = laid
+        return
+      }
+      if (!laid.length) return
+      // Keep the diagram clear of the floating toolbar at the top.
+      const toolbar = 56
+      const vp = getViewportForBounds(layoutBounds(laid), el.clientWidth, el.clientHeight - toolbar, 0.05, 1, 0.04)
+      setViewport({ ...vp, y: vp.y + toolbar }, animate ? { duration: 250 } : undefined)
+    },
+    [setViewport],
+  )
+  const onInit = useCallback(() => {
+    ready.current = true
+    if (pendingFit.current) fitTo(pendingFit.current, false)
+    pendingFit.current = null
+  }, [fitTo])
 
   const relayout = useCallback(
     (dir: Direction) => {
-      pendingFit.current = true
-      setNodes(layoutSchema(schema, dir))
+      const laid = layoutSchema(schema, dir)
+      setSelected(null)
+      setNodes(laid)
+      setGeo(geometry(laid))
+      fitTo(laid)
     },
-    [schema, setNodes],
+    [schema, setNodes, fitTo],
   )
 
   useEffect(() => {
-    setSelected(null)
     relayout(direction)
     // Only re-run when the schema changes; direction changes call relayout directly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -101,23 +140,18 @@ function ErdCanvas({ schema, fileName }: Props) {
     return set
   }, [selected, schema])
 
-  const displayNodes = useMemo(
-    () =>
-      nodes.map((n) => {
+  // Push highlight state into the node data, touching only nodes whose state changes.
+  useEffect(() => {
+    setNodes((ns) =>
+      ns.map((n) => {
         const dim = !!related && !related.has(n.id)
         const active = n.id === selected
         return dim === n.data.dim && active === n.data.active ? n : { ...n, data: { ...n.data, dim, active } }
       }),
-    [nodes, related, selected],
-  )
+    )
+  }, [related, selected, setNodes])
 
   const edges = useMemo<Edge[]>(() => {
-    const geo = new Map(
-      nodes.map((n) => {
-        const w = n.measured?.width ?? (n.style?.width as number) ?? 240
-        return [n.id, { cx: n.position.x + w / 2, w }]
-      }),
-    )
     return schema.relationships.flatMap((r) => {
       const s = geo.get(r.from)
       const t = geo.get(r.to)
@@ -138,8 +172,8 @@ function ErdCanvas({ schema, fileName }: Props) {
           id: r.id,
           source: r.from,
           target: r.to,
-          sourceHandle: `${r.fromColumns[0]}-${sSide}-s`,
-          targetHandle: `${r.toColumns[0]}-${tSide}-t`,
+          sourceHandle: `${r.fromColumns[0]}-${sSide}`,
+          targetHandle: `${r.toColumns[0]}-${tSide}`,
           type: 'smoothstep',
           markerStart: (r.cardinality === 'one-to-one' ? 'm-zero-one' : 'm-many') + hl,
           markerEnd: (r.optional ? 'm-zero-one' : 'm-one') + hl,
@@ -151,7 +185,7 @@ function ErdCanvas({ schema, fileName }: Props) {
         },
       ]
     })
-  }, [nodes, schema, selected, showLabels])
+  }, [geo, schema, selected, showLabels])
 
   const changeDirection = (d: Direction) => {
     setDirection(d)
@@ -199,12 +233,14 @@ function ErdCanvas({ schema, fileName }: Props) {
   }
 
   return (
-    <div className={`erd${selected ? ' has-selection' : ''}`}>
+    <div ref={container} className={`erd${selected ? ' has-selection' : ''}${large ? ' erd--large' : ''}`}>
       <ReactFlow
-        nodes={displayNodes}
+        defaultNodes={NO_NODES}
         edges={edges}
         nodeTypes={nodeTypes}
-        onNodesChange={onNodesChange}
+        connectionMode={ConnectionMode.Loose}
+        onNodeDragStop={() => setGeo(geometry(getNodes()))}
+        onInit={onInit}
         onNodeClick={(_, n) => {
           if (selected === n.id) setSelected(null)
           else if (narrow) focusTable(n.id)
@@ -213,11 +249,9 @@ function ErdCanvas({ schema, fileName }: Props) {
         onPaneClick={() => setSelected(null)}
         nodesConnectable={false}
         edgesFocusable={false}
-        onlyRenderVisibleElements={schema.tables.length > 120}
+        onlyRenderVisibleElements={large}
         minZoom={0.05}
         maxZoom={2.5}
-        fitView
-        fitViewOptions={{ maxZoom: 1 }}
         proOptions={{ hideAttribution: true }}
       >
         <ViewportPortal>
@@ -225,7 +259,7 @@ function ErdCanvas({ schema, fileName }: Props) {
         </ViewportPortal>
         <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
         <Controls showInteractive={false} />
-        <MiniMap pannable zoomable nodeBorderRadius={4} className="erd-minimap" />
+        {!large && <MiniMap pannable zoomable nodeBorderRadius={4} className="erd-minimap" />}
         <Panel position="top-left" className="erd-toolbar">
           <form
             onSubmit={(e) => {

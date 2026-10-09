@@ -1,7 +1,32 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "dev", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev", "--", "--port", "5187", "--strictPort"], "port": 5187 },
-    { "name": "pages-preview", "runtimeExecutable": "npx", "runtimeArgs": ["vite", "preview", "--port", "5188", "--strictPort", "--base", "/sql-diagram/"], "port": 5188 }
+    {
+      "name": "dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "5187",
+        "--strictPort"
+      ],
+      "port": 5187
+    },
+    {
+      "name": "pages-preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "vite",
+        "preview",
+        "--port",
+        "5188",
+        "--strictPort",
+        "--base",
+        "/sql-diagram/"
+      ],
+      "port": 5188
+    }
   ]
 }

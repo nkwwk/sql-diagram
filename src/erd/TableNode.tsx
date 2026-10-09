@@ -27,8 +27,7 @@ function TableNode({ data }: NodeProps<TableNodeType>) {
           .join('\n')
         return (
           <div key={c.name} className="erd-col" title={tip}>
-            <Handle type="target" position={Position.Left} id={`${c.name}-l-t`} isConnectable={false} />
-            <Handle type="source" position={Position.Left} id={`${c.name}-l-s`} isConnectable={false} />
+            <Handle type="source" position={Position.Left} id={`${c.name}-l`} isConnectable={false} />
             <span className="erd-col__keys">
               {c.primaryKey && <span className="key key--pk">PK</span>}
               {ref && <span className="key key--fk">FK</span>}
@@ -39,8 +38,7 @@ function TableNode({ data }: NodeProps<TableNodeType>) {
               {c.type}
               {c.nullable && !c.primaryKey ? '?' : ''}
             </span>
-            <Handle type="target" position={Position.Right} id={`${c.name}-r-t`} isConnectable={false} />
-            <Handle type="source" position={Position.Right} id={`${c.name}-r-s`} isConnectable={false} />
+            <Handle type="source" position={Position.Right} id={`${c.name}-r`} isConnectable={false} />
           </div>
         )
       })}

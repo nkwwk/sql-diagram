@@ -1420,3 +1420,12 @@ table.grid .arrow {
     flex: 1;
   }
 }
+
+/* Large diagrams: drop per-node shadows and transitions so dragging and panning stay smooth. */
+.erd--large .erd-table {
+  box-shadow: none;
+  transition: none;
+}
+.erd--large .erd-table.is-active {
+  box-shadow: 0 0 0 2px var(--edge-active);
+}

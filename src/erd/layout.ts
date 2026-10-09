@@ -97,3 +97,19 @@ export function layoutSchema(schema: Schema, direction: Direction): TableNodeTyp
     data: { table: t, fkTargets: fkTargets(schema, t), dim: false, active: false },
   }))
 }
+
+/** Bounding box of laid-out nodes, using the same size estimate the layout used. */
+export function layoutBounds(nodes: TableNodeType[]) {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const n of nodes) {
+    const { width, height } = nodeSize(n.data.table)
+    minX = Math.min(minX, n.position.x)
+    minY = Math.min(minY, n.position.y)
+    maxX = Math.max(maxX, n.position.x + width)
+    maxY = Math.max(maxY, n.position.y + height)
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+}
