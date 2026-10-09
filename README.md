@@ -4,6 +4,7 @@ Import one or more `.sql` files (schema scripts or full database dumps) and get 
 
 - **Multiple files** are merged into one schema: foreign keys may point across files, and file order doesn't matter (all `CREATE TABLE`s are applied before `ALTER TABLE`s). Add, remove or paste extra files at any time.
 - **Large dumps** are streamed in a Web Worker. A small state machine (`src/sql/scanner.ts`) skips `INSERT` statements and `COPY … FROM stdin` data without copying it, so memory stays flat and the UI stays responsive (roughly 150–200 MB/s on a laptop; a 300 MB dump takes about 1.5 s).
+- **Compressed files and archives** are extracted in the browser, streaming, with no upload: `.gz` (including multi-member files from pigz/bgzip), `.bz2` (including pbzip2 output), `.xz`, `.zst`, `.zip` (stored, deflate, bzip2, zstd and xz entries; ZIP64) and `.tar` / `.tar.gz` / `.tgz` etc. Formats are detected from the file's magic bytes, layers nest (a `.sql.gz` inside a `.zip`), and only `.sql`-like entries inside archives are read. 7-Zip, RAR, PostgreSQL custom-format and SQLite database files are recognised and explained.
 - The extracted DDL (not the raw dump) is remembered in `localStorage`, so a reload restores the diagram.
 
 ## Views
@@ -46,6 +47,7 @@ Tests live in `tests/`:
 
 - `generic.test.ts` — realistic MySQL, pg_dump, SQL Server and SQLite dumps; multi-file merging; diagram generators; layout.
 - `edge.test.ts` — empty input, unterminated strings, semicolons/comment markers inside strings and identifiers, escape rules per dialect, dollar quoting, COPY, DELIMITER, GO, CRLF, encodings, and identical results for every chunk size (1 byte up).
+- `archive.test.ts` — every compression and archive format (committed fixtures in `tests/fixtures/archives/`), multi-member gzip, multi-stream bzip2, ZIP64, nested layers, byte-at-a-time streaming, truncated/corrupt/unsupported files, the bzip2 decoder against the `bzip2` tool, and ~10 MB compressed dumps.
 - `perf.test.ts` — 40 MB INSERT and COPY dumps, a 30 MB string literal, quadratic-trap inputs, 3,000-table schemas and a 400-table layout. Budgets are generous so they hold on CI; set `PERF_SCALE=5` to run with 5× bigger inputs.
 
 ## Deployment

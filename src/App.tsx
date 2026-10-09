@@ -240,7 +240,8 @@ export default function App() {
                     : 'Import one or more schema files or full database dumps to draw ER diagrams, relationships and a data dictionary.'}
                 </p>
                 <p className="muted small">
-                  MySQL / MariaDB · PostgreSQL · SQL Server · SQLite — multi-GB dumps are streamed and parsed locally in your browser.
+                  MySQL / MariaDB · PostgreSQL · SQL Server · SQLite — plain or compressed (.gz, .zip, .tar, .bz2, .xz, .zst). Multi-GB dumps are
+                  streamed and parsed locally in your browser.
                 </p>
               </>
             )}

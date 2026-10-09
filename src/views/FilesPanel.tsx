@@ -9,6 +9,11 @@ interface Props {
   compact: boolean
 }
 
+function formatLabel(r: FileReport) {
+  if (!r.format) return null
+  return /(^|→ )(zip|tar)$/.test(r.format) ? `${r.format} · ${r.entries} .sql` : r.format
+}
+
 function formatMs(ms: number) {
   return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`
 }
@@ -26,6 +31,7 @@ export default function FilesPanel({ files, reports, onRemove, onAdd, compact }:
                   <div className="mono strong file-card__name">{f.name}</div>
                   <div className="muted small">
                     {formatBytes(f.size)}
+                    {r && !r.skipped && r.format ? ` · ${formatLabel(r)} → ${formatBytes(r.textBytes)}` : ''}
                     {r?.skipped
                       ? ` · skipped: ${r.skipped}`
                       : r
@@ -62,6 +68,11 @@ export default function FilesPanel({ files, reports, onRemove, onAdd, compact }:
                 <tr key={`${f.name}:${f.size}:${f.lastModified}:${i}`}>
                   <td className="mono strong">
                     {f.name}
+                    {r && !r.skipped && formatLabel(r) && (
+                      <span className="pill pill--soft" title={`${formatBytes(r.textBytes)} of SQL text after decompression`}>
+                        {formatLabel(r)}
+                      </span>
+                    )}
                     {r && !r.skipped && r.encoding !== 'utf-8' && <span className="pill pill--soft">{r.encoding}</span>}
                     {r?.skipped && <span className="pill pill--warn" title={r.skipped}>skipped</span>}
                   </td>

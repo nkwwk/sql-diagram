@@ -166,17 +166,17 @@ describe('chunk boundaries', () => {
     const sql = 'CREATE TABLE "表" ("列😀" int);'
     const bytes = new TextEncoder().encode(sql)
     // A stream that yields one byte at a time splits every multi-byte sequence.
-    const blob = {
-      size: bytes.length,
-      stream: () =>
-        new ReadableStream<Uint8Array>({
+    class OneByteAtATime extends File {
+      override stream() {
+        return new ReadableStream<Uint8Array<ArrayBuffer>>({
           start(c) {
             for (const b of bytes) c.enqueue(new Uint8Array([b]))
             c.close()
           },
-        }),
-    } as unknown as Blob
-    const { schema } = await importFiles([blob])
+        })
+      }
+    }
+    const { schema } = await importFiles([new OneByteAtATime([bytes], 'unicode.sql')])
     expect(schema.tables[0].id).toBe('表')
     expect(schema.tables[0].columns[0].name).toBe('列😀')
   })
@@ -206,11 +206,11 @@ describe('encodings', () => {
   })
 })
 
-describe('non-SQL files', () => {
+describe('non-SQL and broken files', () => {
   it.each([
     ['png image', [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d], 'not a text file'],
-    ['gzip archive', [0x1f, 0x8b, 0x08, 0, 0, 0], 'gzip-compressed'],
-    ['zip archive', [0x50, 0x4b, 0x03, 0x04, 0x14, 0], 'zip archive'],
+    ['truncated gzip', [0x1f, 0x8b, 0x08, 0, 0, 0], 'could not be read'],
+    ['truncated zip', [0x50, 0x4b, 0x03, 0x04, 0x14, 0], 'not a readable zip archive'],
   ])('skips a %s with a warning and still imports the other files', async (_, bytes, reason) => {
     const { schema, files } = await importFiles([
       new File([new Uint8Array(bytes)], 'not-sql.bin'),
