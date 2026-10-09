@@ -33,7 +33,14 @@ function toMarkdown(schema: Schema) {
   return out.join('\n')
 }
 
-export default function DataDictionary({ schema, fileName, multiFile }: { schema: Schema; fileName: string; multiFile: boolean }) {
+interface Props {
+  schema: Schema
+  fileName: string
+  multiFile: boolean
+  compact: boolean
+}
+
+export default function DataDictionary({ schema, fileName, multiFile, compact }: Props) {
   const [filter, setFilter] = useState('')
   const refs = useMemo(() => refsByTable(schema), [schema])
   const f = filter.trim().toLowerCase()
@@ -69,6 +76,36 @@ export default function DataDictionary({ schema, fileName, multiFile }: { schema
               {multiFile && t.source && <span className="muted small source">{t.source}</span>}
             </h2>
             {t.comment && <p className="muted">{t.comment}</p>}
+            {compact ? (
+              <ul className="col-list">
+                {t.columns.map((c) => {
+                  const ref = tRefs?.get(c.name.toLowerCase())
+                  const hit = f && c.name.toLowerCase().includes(f)
+                  return (
+                    <li key={c.name} className={hit ? 'is-hit' : ''}>
+                      <div className="col-list__top">
+                        <span className={`mono${c.primaryKey ? ' strong' : ''}`}>{c.name}</span>
+                        {c.primaryKey && <span className="key key--pk">PK</span>}
+                        {ref && <span className="key key--fk">FK</span>}
+                        {c.unique && !c.primaryKey && <span className="key key--uq">UQ</span>}
+                        {c.autoIncrement && <span className="key key--ai">AUTO</span>}
+                        <span className="col-list__type mono">{c.type}</span>
+                      </div>
+                      <div className="col-list__meta">
+                        <span>{c.nullable ? 'nullable' : 'not null'}</span>
+                        {c.defaultValue && (
+                          <span>
+                            default <span className="mono">{c.defaultValue}</span>
+                          </span>
+                        )}
+                        {ref && <span className="mono">→ {ref}</span>}
+                      </div>
+                      {c.comment && <div className="col-list__comment">{c.comment}</div>}
+                    </li>
+                  )
+                })}
+              </ul>
+            ) : (
             <div className="table-wrap">
               <table className="grid">
                 <thead>
@@ -108,6 +145,7 @@ export default function DataDictionary({ schema, fileName, multiFile }: { schema
                 </tbody>
               </table>
             </div>
+            )}
           </section>
         )
       })}

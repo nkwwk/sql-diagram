@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
   BackgroundVariant,
@@ -10,6 +10,7 @@ import {
   ViewportPortal,
   getNodesBounds,
   getViewportForBounds,
+  useNodesInitialized,
   useNodesState,
   useReactFlow,
   type Edge,
@@ -20,6 +21,9 @@ import type { Schema } from '../sql/types'
 import TableNode from './TableNode'
 import { layoutSchema, type Direction, type TableNodeType } from './layout'
 import { downloadDataUrl } from '../util/download'
+import { useIsNarrow } from '../util/useMediaQuery'
+import Menu from '../components/Menu'
+import TableDetails from './TableDetails'
 
 const nodeTypes = { table: TableNode }
 
@@ -54,19 +58,30 @@ interface Props {
 }
 
 function ErdCanvas({ schema, fileName }: Props) {
-  const [direction, setDirection] = useState<Direction>('LR')
+  const narrow = useIsNarrow()
+  // Portrait phones fit a top-to-bottom layout much better.
+  const [direction, setDirection] = useState<Direction>(() => (narrow ? 'TB' : 'LR'))
   const [nodes, setNodes, onNodesChange] = useNodesState<TableNodeType>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [showLabels, setShowLabels] = useState(false)
   const [query, setQuery] = useState('')
   const { fitView, setCenter, getNodes } = useReactFlow<TableNodeType, Edge>()
 
+  // Fit once React Flow has measured the freshly laid-out nodes; fitting earlier is unreliable.
+  const pendingFit = useRef(false)
+  const nodesInitialized = useNodesInitialized()
+  useEffect(() => {
+    if (!nodesInitialized || !pendingFit.current) return
+    pendingFit.current = false
+    fitView({ padding: 0.08, maxZoom: 1, duration: 250 })
+  }, [nodesInitialized, fitView])
+
   const relayout = useCallback(
     (dir: Direction) => {
+      pendingFit.current = true
       setNodes(layoutSchema(schema, dir))
-      requestAnimationFrame(() => fitView({ padding: 0.1, maxZoom: 1, duration: 300 }))
     },
-    [schema, setNodes, fitView],
+    [schema, setNodes],
   )
 
   useEffect(() => {
@@ -138,13 +153,28 @@ function ErdCanvas({ schema, fileName }: Props) {
     })
   }, [nodes, schema, selected, showLabels])
 
+  const changeDirection = (d: Direction) => {
+    setDirection(d)
+    relayout(d)
+  }
+
   const focusTable = (id: string) => {
     const n = getNodes().find((x) => x.id.toLowerCase() === id.toLowerCase())
     if (!n) return
     setSelected(n.id)
     const w = n.measured?.width ?? 240
     const h = n.measured?.height ?? 200
-    setCenter(n.position.x + w / 2, n.position.y + h / 2, { zoom: 1.1, duration: 400 })
+    const zoom = narrow ? 0.8 : 1.1
+    // On phones the details sheet covers the lower part of the canvas (below the toolbar),
+    // so centre the table in the strip that stays visible.
+    let offset = 0
+    if (narrow) {
+      const paneH = document.querySelector('.erd')?.clientHeight ?? window.innerHeight
+      const sheetH = Math.min(window.innerHeight * 0.42, paneH * 0.6)
+      const toolbarH = 56
+      offset = (paneH / 2 - (toolbarH + (paneH - sheetH)) / 2) / zoom
+    }
+    setCenter(n.position.x + w / 2, n.position.y + h / 2 + offset, { zoom, duration: 400 })
   }
 
   const exportPng = async () => {
@@ -156,24 +186,30 @@ function ErdCanvas({ schema, fileName }: Props) {
     const height = Math.min(bounds.height + pad * 2, 8000)
     const vp = getViewportForBounds(bounds, width, height, 0.1, 2, 0)
     const bg = getComputedStyle(document.documentElement).getPropertyValue('--canvas').trim() || '#fff'
+    // Mobile browsers cap canvas size (~16.7 MP on iOS); stay under it.
+    const pixelRatio = Math.min(2, Math.sqrt(16_000_000 / (width * height)))
     const url = await toPng(el, {
       backgroundColor: bg,
       width,
       height,
-      pixelRatio: 2,
+      pixelRatio,
       style: { width: `${width}px`, height: `${height}px`, transform: `translate(${vp.x}px, ${vp.y}px) scale(${vp.zoom})` },
     })
     downloadDataUrl(url, `${fileName}-erd.png`)
   }
 
   return (
-    <div className="erd">
+    <div className={`erd${selected ? ' has-selection' : ''}`}>
       <ReactFlow
         nodes={displayNodes}
         edges={edges}
         nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
-        onNodeClick={(_, n) => setSelected((cur) => (cur === n.id ? null : n.id))}
+        onNodeClick={(_, n) => {
+          if (selected === n.id) setSelected(null)
+          else if (narrow) focusTable(n.id)
+          else setSelected(n.id)
+        }}
         onPaneClick={() => setSelected(null)}
         nodesConnectable={false}
         edgesFocusable={false}
@@ -213,29 +249,43 @@ function ErdCanvas({ schema, fileName }: Props) {
               ))}
             </datalist>
           </form>
-          <div className="seg" role="group" aria-label="Layout direction">
-            {(['LR', 'TB'] as const).map((d) => (
-              <button
-                key={d}
-                className={direction === d ? 'is-on' : ''}
-                onClick={() => {
-                  setDirection(d)
-                  relayout(d)
-                }}
-              >
-                {d === 'LR' ? 'Horizontal' : 'Vertical'}
+          {narrow ? (
+            <Menu
+              label="Diagram options"
+              items={[
+                { label: 'Horizontal layout', active: direction === 'LR', onSelect: () => changeDirection('LR') },
+                { label: 'Vertical layout', active: direction === 'TB', onSelect: () => changeDirection('TB') },
+                { label: 'Re-run auto layout', onSelect: () => relayout(direction) },
+                'separator',
+                { label: 'Show edge labels', active: showLabels, onSelect: () => setShowLabels((v) => !v) },
+                { label: 'Export PNG', onSelect: exportPng },
+              ]}
+            />
+          ) : (
+            <>
+              <div className="seg" role="group" aria-label="Layout direction">
+                {(['LR', 'TB'] as const).map((d) => (
+                  <button key={d} className={direction === d ? 'is-on' : ''} onClick={() => changeDirection(d)}>
+                    {d === 'LR' ? 'Horizontal' : 'Vertical'}
+                  </button>
+                ))}
+              </div>
+              <button onClick={() => relayout(direction)} title="Re-run auto layout">
+                Auto layout
               </button>
-            ))}
-          </div>
-          <button onClick={() => relayout(direction)} title="Re-run auto layout">
-            Auto layout
-          </button>
-          <label className="check">
-            <input type="checkbox" checked={showLabels} onChange={(e) => setShowLabels(e.target.checked)} />
-            Edge labels
-          </label>
-          <button onClick={exportPng}>Export PNG</button>
+              <label className="check">
+                <input type="checkbox" checked={showLabels} onChange={(e) => setShowLabels(e.target.checked)} />
+                Edge labels
+              </label>
+              <button onClick={exportPng}>Export PNG</button>
+            </>
+          )}
         </Panel>
+        {selected && (
+          <Panel position={narrow ? 'bottom-center' : 'top-right'} className="erd-details-panel">
+            <TableDetails schema={schema} tableId={selected} onSelect={focusTable} onClose={() => setSelected(null)} />
+          </Panel>
+        )}
         <Panel position="bottom-right" className="erd-legend">
           <svg width="44" height="14" aria-hidden>
             <path d="M0 7 H44" className="legend-line" />

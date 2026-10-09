@@ -8,14 +8,16 @@ import DataDictionary from './views/DataDictionary'
 import FilesPanel from './views/FilesPanel'
 import { useImport } from './useImport'
 import { formatBytes } from './util/format'
+import { useIsNarrow, useIsTouch } from './util/useMediaQuery'
+import Menu from './components/Menu'
 
 const TABS = [
-  { id: 'erd', label: 'ER diagram' },
-  { id: 'crowsfoot', label: "Crow's foot" },
-  { id: 'class', label: 'UML class' },
-  { id: 'graph', label: 'Dependency graph' },
-  { id: 'relationships', label: 'Relationships' },
-  { id: 'dictionary', label: 'Data dictionary' },
+  { id: 'erd', label: 'ER diagram', short: 'ERD' },
+  { id: 'crowsfoot', label: "Crow's foot", short: "Crow's foot" },
+  { id: 'class', label: 'UML class', short: 'UML' },
+  { id: 'graph', label: 'Dependency graph', short: 'Graph' },
+  { id: 'relationships', label: 'Relationships', short: 'Relations' },
+  { id: 'dictionary', label: 'Data dictionary', short: 'Dictionary' },
 ] as const
 
 type TabId = (typeof TABS)[number]['id']
@@ -35,6 +37,14 @@ export default function App() {
   const [graphDir, setGraphDir] = useState<'LR' | 'TB'>('LR')
   const openInput = useRef<HTMLInputElement>(null)
   const addInput = useRef<HTMLInputElement>(null)
+  const tabsRef = useRef<HTMLElement>(null)
+  const narrow = useIsNarrow()
+  const touch = useIsTouch()
+
+  // Keep the active tab visible in the horizontally scrolling tab strip.
+  useEffect(() => {
+    tabsRef.current?.querySelector('.is-on')?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' })
+  }, [tab])
 
   const schema = result?.schema ?? null
   const baseName = files.length === 1 ? files[0].name.replace(/\.[^.]+$/, '') : 'schema'
@@ -87,6 +97,10 @@ export default function App() {
   }, [])
 
   const loadSample = () => replaceFiles([new File([SAMPLE_SQL], 'sample.sql', { type: 'text/plain' })])
+  const openPaste = () => {
+    setDraft('')
+    setPasteOpen(true)
+  }
   const togglePanel = (p: Panel) => setPanel((cur) => (cur === p ? null : p))
 
   const columnCount = schema?.tables.reduce((n, t) => n + t.columns.length, 0) ?? 0
@@ -106,22 +120,29 @@ export default function App() {
         </div>
         <div className="import-actions">
           <button className="primary" onClick={() => openInput.current?.click()}>
-            Open .sql files
+            {narrow ? 'Open' : 'Open .sql files'}
           </button>
-          {hasFiles && <button onClick={() => addInput.current?.click()}>Add files</button>}
-          <button
-            onClick={() => {
-              setDraft('')
-              setPasteOpen(true)
-            }}
-          >
-            Paste SQL
-          </button>
-          <button onClick={loadSample}>Load sample</button>
-          {hasFiles && (
-            <button className="ghost" onClick={() => replaceFiles([])}>
-              Clear
-            </button>
+          {narrow ? (
+            <Menu
+              label="Import options"
+              items={[
+                ...(hasFiles ? [{ label: 'Add more files', onSelect: () => addInput.current?.click() }] : []),
+                { label: 'Paste SQL', onSelect: openPaste },
+                { label: 'Load sample schema', onSelect: loadSample },
+                ...(hasFiles ? (['separator', { label: 'Clear all files', onSelect: () => replaceFiles([]), danger: true }] as const) : []),
+              ]}
+            />
+          ) : (
+            <>
+              {hasFiles && <button onClick={() => addInput.current?.click()}>Add files</button>}
+              <button onClick={openPaste}>Paste SQL</button>
+              <button onClick={loadSample}>Load sample</button>
+              {hasFiles && (
+                <button className="ghost" onClick={() => replaceFiles([])}>
+                  Clear
+                </button>
+              )}
+            </>
           )}
           <input
             ref={openInput}
@@ -155,11 +176,11 @@ export default function App() {
             {schema && (
               <>
                 <span><b>{schema.tables.length}</b> tables</span>
-                <span><b>{columnCount}</b> columns</span>
-                <span><b>{schema.relationships.length}</b> relationships</span>
+                <span><b>{columnCount}</b> {narrow ? 'cols' : 'columns'}</span>
+                <span><b>{schema.relationships.length}</b> {narrow ? 'FKs' : 'relationships'}</span>
                 {schema.warnings.length > 0 && (
                   <button className="chip warn-chip" onClick={() => togglePanel('warnings')}>
-                    {schema.warnings.length} warning{schema.warnings.length === 1 ? '' : 's'}
+                    {narrow ? `⚠ ${schema.warnings.length}` : `${schema.warnings.length} warning${schema.warnings.length === 1 ? '' : 's'}`}
                   </button>
                 )}
               </>
@@ -173,7 +194,7 @@ export default function App() {
           <div className="progress__bar" style={{ width: `${progress ? pct : 2}%` }} />
           <span className="progress__text">
             {progress
-              ? `Parsing ${progress.name}${progress.fileCount > 1 ? ` (${progress.fileIndex + 1}/${progress.fileCount})` : ''} — ${pct}% · ${formatBytes(progress.loaded)} of ${formatBytes(progress.total)}`
+              ? `${narrow ? '' : `Parsing ${progress.name}`}${progress.fileCount > 1 ? ` (${progress.fileIndex + 1}/${progress.fileCount})` : ''}${narrow ? '' : ' — '}${pct}% · ${formatBytes(progress.loaded)} of ${formatBytes(progress.total)}`
               : 'Parsing…'}
           </span>
         </div>
@@ -181,7 +202,13 @@ export default function App() {
       {error && <div className="warnings">Import failed: {error}</div>}
 
       {panel === 'files' && hasFiles && (
-        <FilesPanel files={files} reports={busy ? null : (result?.files ?? null)} onRemove={removeFile} onAdd={() => addInput.current?.click()} />
+        <FilesPanel
+          files={files}
+          reports={busy ? null : (result?.files ?? null)}
+          onRemove={removeFile}
+          onAdd={() => addInput.current?.click()}
+          compact={narrow}
+        />
       )}
       {panel === 'warnings' && schema && schema.warnings.length > 0 && (
         <div className="warnings">
@@ -206,7 +233,7 @@ export default function App() {
               </>
             ) : (
               <>
-                <h1>{hasFiles ? 'No tables found' : 'Drop .sql files here'}</h1>
+                <h1>{hasFiles ? 'No tables found' : touch ? 'Open .sql files' : 'Drop .sql files here'}</h1>
                 <p>
                   {hasFiles
                     ? 'The files were read, but they contain no CREATE TABLE statements.'
@@ -219,16 +246,17 @@ export default function App() {
             )}
             <div className="empty-actions" onClick={(e) => e.stopPropagation()}>
               <button className="primary" onClick={() => openInput.current?.click()}>Choose files</button>
+              {touch && <button onClick={openPaste}>Paste SQL</button>}
               <button onClick={loadSample}>Try the sample schema</button>
             </div>
           </div>
         </main>
       ) : (
         <main className="workspace">
-          <nav className="tabs" role="tablist">
+          <nav className="tabs" role="tablist" ref={tabsRef}>
             {TABS.map((t) => (
               <button key={t.id} role="tab" aria-selected={tab === t.id} className={tab === t.id ? 'is-on' : ''} onClick={() => setTab(t.id)}>
-                {t.label}
+                {narrow ? t.short : t.label}
               </button>
             ))}
           </nav>
@@ -266,8 +294,8 @@ export default function App() {
                 </div>
               </MermaidView>
             )}
-            {tab === 'relationships' && <RelationshipsView schema={schema} />}
-            {tab === 'dictionary' && <DataDictionary schema={schema} fileName={baseName} multiFile={files.length > 1} />}
+            {tab === 'relationships' && <RelationshipsView schema={schema} compact={narrow} />}
+            {tab === 'dictionary' && <DataDictionary schema={schema} fileName={baseName} multiFile={files.length > 1} compact={narrow} />}
           </div>
         </main>
       )}

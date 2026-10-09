@@ -6,11 +6,41 @@ interface Props {
   reports: FileReport[] | null
   onRemove: (index: number) => void
   onAdd: () => void
+  compact: boolean
 }
 
-export default function FilesPanel({ files, reports, onRemove, onAdd }: Props) {
+function formatMs(ms: number) {
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`
+}
+
+export default function FilesPanel({ files, reports, onRemove, onAdd, compact }: Props) {
   return (
     <div className="files-panel">
+      {compact ? (
+        <ul className="card-list">
+          {files.map((f, i) => {
+            const r = reports?.[i]
+            return (
+              <li key={`${f.name}:${f.size}:${f.lastModified}:${i}`} className="card file-card">
+                <div className="file-card__main">
+                  <div className="mono strong file-card__name">{f.name}</div>
+                  <div className="muted small">
+                    {formatBytes(f.size)}
+                    {r?.skipped
+                      ? ` · skipped: ${r.skipped}`
+                      : r
+                        ? ` · ${formatCount(r.tables)} tables · ${formatCount(r.inserts + r.copyBlocks)} data statements skipped · ${formatMs(r.ms)}`
+                        : ' · parsing…'}
+                  </div>
+                </div>
+                <button className="ghost icon-btn" onClick={() => onRemove(i)} aria-label={`Remove ${f.name}`}>
+                  ×
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      ) : (
       <div className="table-wrap">
         <table className="grid">
           <thead>
@@ -41,7 +71,7 @@ export default function FilesPanel({ files, reports, onRemove, onAdd }: Props) {
                   <td className="num" title={r ? `${formatCount(r.inserts)} INSERT, ${formatCount(r.copyBlocks)} COPY blocks` : undefined}>
                     {skipped === null ? '…' : formatCount(skipped)}
                   </td>
-                  <td className="num">{r ? `${r.ms < 1000 ? Math.round(r.ms) + ' ms' : (r.ms / 1000).toFixed(1) + ' s'}` : '…'}</td>
+                  <td className="num">{r ? formatMs(r.ms) : '…'}</td>
                   <td className="num">
                     <button className="ghost icon-btn" onClick={() => onRemove(i)} aria-label={`Remove ${f.name}`} title="Remove file">
                       ×
@@ -53,6 +83,7 @@ export default function FilesPanel({ files, reports, onRemove, onAdd }: Props) {
           </tbody>
         </table>
       </div>
+      )}
       <p className="muted small">
         Tables from all files are merged into one schema; foreign keys may point across files.{' '}
         <button className="link-btn" onClick={onAdd}>Add more files</button>

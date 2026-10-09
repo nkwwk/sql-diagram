@@ -5,7 +5,7 @@ function cardinalityText(card: string, optional: boolean) {
   return card === 'one-to-one' ? `Each row has ${parent} parent; parent has at most one` : `Each row has ${parent} parent; parent has many`
 }
 
-export default function RelationshipsView({ schema }: { schema: Schema }) {
+export default function RelationshipsView({ schema, compact }: { schema: Schema; compact: boolean }) {
   const refCount = new Map<string, { out: number; in: number }>()
   for (const t of schema.tables) refCount.set(t.id, { out: 0, in: 0 })
   for (const r of schema.relationships) {
@@ -23,6 +23,34 @@ export default function RelationshipsView({ schema }: { schema: Schema }) {
         <h2>Foreign key relationships <span className="count">{schema.relationships.length}</span></h2>
         {schema.relationships.length === 0 ? (
           <p className="muted">No foreign keys were found in this file.</p>
+        ) : compact ? (
+          <ul className="card-list">
+            {schema.relationships.map((r) => (
+              <li key={r.id} className="card">
+                <div className="rel-path">
+                  <span className="mono">
+                    <b>{r.from}</b>.{r.fromColumns.join(', ')}
+                  </span>
+                  <span className="arrow" aria-label="references">→</span>
+                  <span className="mono">
+                    <b>{r.to}</b>.{r.toColumns.join(', ')}
+                  </span>
+                </div>
+                <div className="card__meta">
+                  <span className={`pill ${r.cardinality === 'one-to-one' ? 'pill--one' : 'pill--many'}`}>
+                    {r.cardinality === 'one-to-one' ? '1 : 1' : 'N : 1'}
+                  </span>
+                  {r.optional && <span className="pill pill--soft">optional</span>}
+                  {r.identifying && <span className="pill pill--soft">identifying</span>}
+                  {r.from === r.to && <span className="pill pill--soft">self</span>}
+                  {r.onDelete && <span className="pill pill--soft">on delete {r.onDelete.toLowerCase()}</span>}
+                  {r.onUpdate && <span className="pill pill--soft">on update {r.onUpdate.toLowerCase()}</span>}
+                </div>
+                <div className="muted small">{cardinalityText(r.cardinality, r.optional)}</div>
+                {r.name && <div className="muted small mono">{r.name}</div>}
+              </li>
+            ))}
+          </ul>
         ) : (
           <div className="table-wrap">
             <table className="grid">
@@ -92,8 +120,8 @@ export default function RelationshipsView({ schema }: { schema: Schema }) {
             <thead>
               <tr>
                 <th>Table</th>
-                <th className="num">References (out)</th>
-                <th className="num">Referenced by (in)</th>
+                <th className="num">{compact ? 'Out' : 'References (out)'}</th>
+                <th className="num">{compact ? 'In' : 'Referenced by (in)'}</th>
                 <th>Role</th>
               </tr>
             </thead>
