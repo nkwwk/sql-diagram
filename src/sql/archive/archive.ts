@@ -5,7 +5,8 @@
  *   gzip (.gz)  — fflate (the native DecompressionStream stops after the first
  *                 member, so multi-member files from pigz/bgzip would fail)
  *   zip         — central directory read via Blob.slice (random access, no full load);
- *                 stored / deflate (native) / bzip2 / zstd / xz entries
+ *                 stored / deflate (native) / bzip2 / zstd / xz entries; password-protected
+ *                 entries (ZipCrypto and WinZip AES) via ./zipcrypto.ts
  *   tar         — streaming reader (ustar, GNU long names, pax paths)
  *   zstd (.zst) — fzstd
  *   bzip2 (.bz2)— ./bzip2.ts
@@ -18,6 +19,7 @@ import { Gunzip } from 'fflate'
 import { Decompress as ZstdDecompress } from 'fzstd'
 import { XzReadableStream } from 'xz-decompress'
 import { Bunzip2 } from './bzip2'
+import { AES_SALT_LENGTH, Crc32, openWinZipAes, openZipCrypto } from './zipcrypto'
 
 export type Compression = 'gzip' | 'zstd' | 'bzip2' | 'xz'
 export type Format = Compression | 'zip' | 'tar' | 'text'
@@ -204,11 +206,29 @@ function wantedEntry(path: string): boolean {
   return SQL_ENTRY.test(inner) || ARCHIVE_EXT.test(inner)
 }
 
+export interface PasswordRequest {
+  archive: string
+  /** The first encrypted entry that needs the password. */
+  entry: string
+  /** 0 for the first prompt; higher after wrong passwords. */
+  attempt: number
+}
+
+export interface PasswordOptions {
+  /** Passwords that already worked during this import; tried before prompting. */
+  known: string[]
+  /** Ask the user; resolves to null when they choose to skip. */
+  ask?: (request: PasswordRequest) => Promise<string | null>
+}
+
 export interface OpenOptions {
   /** Called with the number of input (compressed) bytes consumed. */
   onBytes?: (n: number) => void
   /** Non-fatal notes, e.g. archive entries that were skipped. */
   onNote?: (message: string) => void
+  passwords?: PasswordOptions
+  /** Called when an encrypted entry is opened, so callers can avoid persisting its contents. */
+  onDecrypt?: () => void
 }
 
 /** Opens a file and yields every SQL text entry inside it (a plain file yields itself). */
@@ -246,7 +266,7 @@ async function* expandStream(
   if (format === 'zip') {
     // A zip needs random access, so a zip inside another stream is buffered in memory.
     const blob = await new Response(rest).blob()
-    yield* zipEntries(blob, name, layers, {})
+    yield* zipEntries(blob, name, layers, { ...opts, onBytes: undefined })
     return
   }
   if (format === 'tar') {
@@ -436,10 +456,14 @@ async function* zipEntries(file: Blob, archive: string, layers: Format[], opts: 
   const latin1 = new TextDecoder('latin1')
   let p = 0
   let yielded = 0
+  let encryptedSkipped = 0
+  let skipEncrypted = false
   for (let i = 0; i < count && p + 46 <= cd.byteLength; i++) {
     if (cd.getUint32(p, true) !== 0x02014b50) throw new ArchiveError('it has a corrupt zip central directory')
     const flags = cd.getUint16(p + 8, true)
     const method = cd.getUint16(p + 10, true)
+    const crc = cd.getUint32(p + 16, true)
+    let aes: { strength: number; method: number } | null = null
     let compSize = cd.getUint32(p + 20, true)
     let size = cd.getUint32(p + 24, true)
     const nameLen = cd.getUint16(p + 28, true)
@@ -466,6 +490,9 @@ async function* zipEntries(file: Blob, archive: string, layers: Format[], opts: 
           q += 8
         }
         if (localOffset === 0xffffffff) localOffset = u64(cd, q)
+      } else if (id === 0x9901 && len >= 7) {
+        // WinZip AES: version(2) "AE"(2) strength(1) actual-method(2)
+        aes = { strength: cd.getUint8(e + 8), method: cd.getUint16(e + 9, true) }
       }
       e += 4 + len
     }
@@ -475,29 +502,126 @@ async function* zipEntries(file: Blob, archive: string, layers: Format[], opts: 
       if (!path.endsWith('/') && !path.startsWith('__MACOSX/')) opts.onNote?.(`Skipped "${archive}/${path}" (not a .sql file).`)
       continue
     }
-    if (flags & 1) {
-      opts.onNote?.(`Skipped "${archive}/${path}": encrypted zip entries are not supported.`)
-      continue
-    }
-    const kind = ZIP_METHODS[method]
+    const actualMethod = method === 99 && aes ? aes.method : method
+    const kind = ZIP_METHODS[actualMethod]
     if (!kind) {
-      opts.onNote?.(`Skipped "${archive}/${path}": unsupported zip compression method ${method}.`)
+      opts.onNote?.(`Skipped "${archive}/${path}": unsupported zip compression method ${actualMethod}.`)
       continue
     }
 
     const local = await readBytes(file, localOffset, localOffset + 30)
     if (local.getUint32(0, true) !== 0x04034b50) throw new ArchiveError(`it has a corrupt entry "${path}"`)
     const dataStart = localOffset + 30 + local.getUint16(26, true) + local.getUint16(28, true)
-    let raw: ReadableStream<Uint8Array> = file.slice(dataStart, dataStart + compSize).stream()
+
+    let start = dataStart
+    let end = dataStart + compSize
+    let decrypt: ((chunk: Uint8Array) => Uint8Array) | null = null
+    if (flags & 1) {
+      if (skipEncrypted) {
+        encryptedSkipped++
+        continue
+      }
+      const unlocked = await unlockEntry(file, archive, path, { dataStart, compSize, crc, dosTime: local.getUint16(10, true), aes }, opts)
+      if (!unlocked) {
+        skipEncrypted = true
+        encryptedSkipped++
+        continue
+      }
+      ;({ start, end, decrypt } = unlocked)
+      opts.onDecrypt?.()
+    }
+
+    let raw: ReadableStream<Uint8Array> = file.slice(start, end).stream()
     if (opts.onBytes) raw = counted(raw, opts.onBytes)
-    const stream =
+    if (decrypt) raw = raw.pipeThrough(mapStream(decrypt))
+    let stream =
       kind === 'store'
         ? raw
         : kind === 'deflate'
           ? raw.pipeThrough(new DecompressionStream('deflate-raw') as unknown as TransformStream<Uint8Array, Uint8Array>)
           : decompress(kind, raw)
+    // A wrong password can slip past the 1-byte (ZipCrypto) or 2-byte (AES) check; the CRC catches it.
+    // AE-2 entries store no CRC (0), relying on the AES verifier instead.
+    if (decrypt && crc !== 0) stream = stream.pipeThrough(crcCheck(crc))
     yielded++
     yield* entrySafely(expandStream(stream, `${archive}/${path}`, [...layers, 'zip'], opts), `${archive}/${path}`, opts)
   }
-  if (yielded === 0) throw new ArchiveError('the archive contains no .sql files')
+  if (encryptedSkipped > 0 && yielded > 0) {
+    opts.onNote?.(`Skipped ${encryptedSkipped} password-protected file${encryptedSkipped === 1 ? '' : 's'} in "${archive}" (no password given).`)
+  }
+  if (yielded === 0) {
+    throw new ArchiveError(encryptedSkipped ? 'it is password-protected and no password was given' : 'the archive contains no .sql files')
+  }
+}
+
+interface EncryptedEntry {
+  dataStart: number
+  compSize: number
+  crc: number
+  dosTime: number
+  aes: { strength: number; method: number } | null
+}
+
+/** Finds a working password (known ones first, then by asking) and returns the plaintext range and decryptor. */
+async function unlockEntry(file: Blob, archive: string, path: string, entry: EncryptedEntry, opts: OpenOptions) {
+  const { dataStart, compSize, crc, dosTime, aes } = entry
+  let tryPassword: (password: string) => Promise<((chunk: Uint8Array) => Uint8Array) | null>
+  let start: number
+  let end: number
+  if (aes) {
+    const saltLen = AES_SALT_LENGTH[aes.strength]
+    if (!saltLen) throw new ArchiveError(`"${path}" uses an unknown AES strength`)
+    const head = new Uint8Array(await file.slice(dataStart, dataStart + saltLen + 2).arrayBuffer())
+    start = dataStart + saltLen + 2
+    end = dataStart + compSize - 10 // 10-byte authentication code follows the data
+    tryPassword = async (pw) => {
+      const ctr = await openWinZipAes(pw, aes.strength, head.subarray(0, saltLen), head.subarray(saltLen))
+      return ctr && ((chunk) => ctr.apply(chunk))
+    }
+  } else {
+    const header = new Uint8Array(await file.slice(dataStart, dataStart + 12).arrayBuffer())
+    start = dataStart + 12
+    end = dataStart + compSize
+    tryPassword = async (pw) => {
+      const d = openZipCrypto(pw, header, crc, dosTime)
+      return d && ((chunk) => d.decrypt(chunk))
+    }
+  }
+
+  const passwords = opts.passwords
+  for (const pw of passwords?.known ?? []) {
+    const decrypt = await tryPassword(pw)
+    if (decrypt) return { start, end, decrypt }
+  }
+  if (!passwords?.ask) return null
+  for (let attempt = 0; ; attempt++) {
+    const pw = await passwords.ask({ archive, entry: path, attempt })
+    if (pw === null) return null
+    const decrypt = await tryPassword(pw)
+    if (decrypt) {
+      if (!passwords.known.includes(pw)) passwords.known.push(pw)
+      return { start, end, decrypt }
+    }
+  }
+}
+
+function mapStream(fn: (chunk: Uint8Array) => Uint8Array) {
+  return new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      controller.enqueue(fn(chunk.slice()))
+    },
+  })
+}
+
+function crcCheck(expected: number) {
+  const crc = new Crc32()
+  return new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      crc.update(chunk)
+      controller.enqueue(chunk)
+    },
+    flush() {
+      if (crc.value !== expected) throw new ArchiveError('the password is incorrect or the data is corrupted')
+    },
+  })
 }

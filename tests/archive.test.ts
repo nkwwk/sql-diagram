@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createCipheriv, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto'
 import { deflateRawSync, gzipSync } from 'node:zlib'
 import { importFiles } from '../src/sql/import'
 import { Bunzip2 } from '../src/sql/archive/bzip2'
@@ -122,23 +122,115 @@ describe('archives', () => {
     }
   })
 
-  it('skips encrypted and unknown-method zip entries with a warning', async () => {
+  it('skips unknown-method zip entries with a warning', async () => {
     const data = new TextEncoder().encode('CREATE TABLE ok (id int);')
     const zip = makeZip([
       { name: 'ok.sql', data, method: 0 },
-      { name: 'secret.sql', data, method: 0, flags: 1 },
-      { name: 'weird.sql', data, method: 99 },
+      { name: 'weird.sql', data, method: 77 },
     ])
     const result = await importFiles([new File([zip], 'mixed.zip')])
     expect(tableIds(result)).toEqual(['ok'])
-    expect(result.schema.warnings).toContain('Skipped "mixed.zip/secret.sql": encrypted zip entries are not supported.')
-    expect(result.schema.warnings).toContain('Skipped "mixed.zip/weird.sql": unsupported zip compression method 99.')
+    expect(result.schema.warnings).toContain('Skipped "mixed.zip/weird.sql": unsupported zip compression method 77.')
   })
 
   it('treats an archive with no SQL files as skipped', async () => {
     const zip = makeZip([{ name: 'readme.md', data: new TextEncoder().encode('# hi'), method: 0 }])
     const result = await importFiles([new File([zip], 'docs.zip')])
     expect(result.files[0].skipped).toBe('the archive contains no .sql files')
+  })
+})
+
+describe('password-protected zips', () => {
+  const PASSWORD = 'sql-diagram-test'
+  const sql = (t: string) => new TextEncoder().encode(`CREATE TABLE ${t} (id int PRIMARY KEY);`)
+  /** Scripted answers to password prompts; records each request. */
+  const answers = (...replies: (string | null)[]) => {
+    const asked: { archive: string; entry: string; attempt: number }[] = []
+    const ask = async (req: { archive: string; entry: string; attempt: number }) => {
+      asked.push(req)
+      return replies.length ? replies.shift()! : null
+    }
+    return { ask, asked }
+  }
+
+  it('unlocks a ZipCrypto archive made by `zip -P`', async () => {
+    const { ask, asked } = answers(PASSWORD)
+    const result = await importFiles([fixture('protected.zip')], undefined, ask)
+    expect(tableIds(result)).toEqual(['customers', 'orders'])
+    expect(result.schema.relationships).toHaveLength(1)
+    // One prompt for the archive: the password is reused for the second entry.
+    expect(asked).toEqual([{ archive: 'protected.zip', entry: 'customers.sql', attempt: 0 }])
+    expect(result.files[0]).toMatchObject({ encrypted: true, entries: 2 })
+    expect(result.sensitive).toBe(true)
+  })
+
+  it('re-prompts after a wrong password', async () => {
+    const { ask, asked } = answers('nope', 'still wrong', PASSWORD)
+    const result = await importFiles([fixture('protected.zip')], undefined, ask)
+    expect(tableIds(result)).toEqual(['customers', 'orders'])
+    expect(asked.map((a) => a.attempt)).toEqual([0, 1, 2])
+  })
+
+  it('skips all protected entries of an archive when the user declines', async () => {
+    const { ask, asked } = answers(null)
+    const result = await importFiles([fixture('protected.zip'), new File(['CREATE TABLE plain (id int);'], 'plain.sql')], undefined, ask)
+    expect(tableIds(result)).toEqual(['plain'])
+    expect(asked).toHaveLength(1)
+    expect(result.files[0].skipped).toBe('it is password-protected and no password was given')
+    expect(result.sensitive).toBe(false)
+  })
+
+  it('reports protected entries when no prompt is available', async () => {
+    const result = await importFiles([fixture('protected.zip')])
+    expect(result.files[0].skipped).toBe('it is password-protected and no password was given')
+  })
+
+  it.each([
+    ['AES-128 AE-1', { aes: 1 as const }],
+    ['AES-192 AE-1', { aes: 2 as const }],
+    ['AES-256 AE-2', { aes: 3 as const, ae2: true }],
+    ['ZipCrypto with data descriptor', { descriptor: true }],
+  ])('decrypts %s entries (stored and deflated)', async (_, scheme) => {
+    const zip = makeZip([
+      { name: 'a.sql', data: sql('a'), method: 0, encrypt: { password: PASSWORD, ...scheme } },
+      { name: 'b.sql', data: sql('b'), method: 8, compressed: deflateRawSync(sql('b')), encrypt: { password: PASSWORD, ...scheme } },
+    ])
+    const { ask, asked } = answers('wrong', PASSWORD)
+    const result = await importFiles([new File([zip], 'aes.zip')], undefined, ask)
+    expect(tableIds(result)).toEqual(['a', 'b'])
+    expect(asked.map((a) => a.attempt)).toEqual([0, 1])
+  })
+
+  it('asks once for archives that share a password', async () => {
+    const make = (t: string) => makeZip([{ name: `${t}.sql`, data: sql(t), method: 0, encrypt: { password: PASSWORD, aes: 3 } }])
+    const { ask, asked } = answers(PASSWORD)
+    const result = await importFiles([new File([make('one')], 'one.zip'), new File([make('two')], 'two.zip')], undefined, ask)
+    expect(tableIds(result)).toEqual(['one', 'two'])
+    expect(asked).toHaveLength(1)
+  })
+
+  it('does not prompt for protected entries that are not SQL files', async () => {
+    const zip = makeZip([
+      { name: 'schema.sql', data: sql('s'), method: 0 },
+      { name: 'secrets.txt', data: sql('x'), method: 0, encrypt: { password: PASSWORD } },
+    ])
+    const { ask, asked } = answers()
+    await importFiles([new File([zip], 'mixed.zip')], undefined, ask)
+    expect(asked).toHaveLength(0)
+  })
+
+  it('catches a wrong ZipCrypto password that passes the 1-byte check with the CRC', async () => {
+    // Find a wrong password whose check byte happens to match (1 in 256), then confirm the CRC catches it.
+    const data = new TextEncoder().encode('CREATE TABLE z (id int);'.repeat(20))
+    const zip = makeZip([{ name: 'z.sql', data, method: 8, compressed: deflateRawSync(data), encrypt: { password: PASSWORD } }])
+    const { openZipCrypto } = await import('../src/sql/archive/zipcrypto')
+    const header = zip.subarray(30 + 'z.sql'.length, 30 + 'z.sql'.length + 12)
+    const crc = CRC32(data)
+    let impostor = ''
+    for (let i = 0; !impostor; i++) if (openZipCrypto(`guess-${i}`, header, crc, DOS_TIME)) impostor = `guess-${i}`
+    const result = await importFiles([new File([zip], 'z.zip')], undefined, answers(impostor).ask)
+    expect(result.schema.tables).toHaveLength(0)
+    expect(result.files[0].skipped ?? result.schema.warnings.join(' ')).toMatch(/password is incorrect|could not be read/)
   })
 })
 
@@ -226,7 +318,8 @@ describe('large compressed dumps', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Minimal zip writer for tests (supports forcing zip64 records).
+// Minimal zip writer for tests: zip64 records and both encryption schemes, implemented
+// independently with Node's crypto so the decryptor is checked against another implementation.
 
 interface ZipEntry {
   name: string
@@ -234,6 +327,7 @@ interface ZipEntry {
   method: number
   compressed?: Uint8Array
   flags?: number
+  encrypt?: { password: string; aes?: 1 | 2 | 3; ae2?: boolean; descriptor?: boolean }
 }
 
 const CRC32 = (() => {
@@ -243,12 +337,55 @@ const CRC32 = (() => {
     for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
     t[i] = c >>> 0
   }
-  return (b: Uint8Array) => {
+  const fn = (b: Uint8Array) => {
     let c = 0xffffffff
     for (const x of b) c = t[(c ^ x) & 0xff] ^ (c >>> 8)
     return (c ^ 0xffffffff) >>> 0
   }
+  fn.byte = (crc: number, b: number) => (t[(crc ^ b) & 0xff] ^ (crc >>> 8)) >>> 0
+  return fn
 })()
+
+const DOS_TIME = 0x5a3c
+
+function zipCryptoEncrypt(password: string, plain: Uint8Array, checkByte: number): Uint8Array {
+  let k0 = 0x12345678
+  let k1 = 0x23456789
+  let k2 = 0x34567890
+  const update = (b: number) => {
+    k0 = CRC32.byte(k0, b)
+    k1 = (Math.imul((k1 + (k0 & 0xff)) >>> 0, 134775813) + 1) >>> 0
+    k2 = CRC32.byte(k2, k1 >>> 24)
+  }
+  for (const b of new TextEncoder().encode(password)) update(b)
+  const header = randomBytes(12)
+  header[11] = checkByte
+  const input = Buffer.concat([header, plain])
+  const out = new Uint8Array(input.length)
+  for (let i = 0; i < input.length; i++) {
+    const t = (k2 | 2) & 0xffff
+    out[i] = input[i] ^ ((Math.imul(t, t ^ 1) >>> 8) & 0xff)
+    update(input[i])
+  }
+  return out
+}
+
+function winZipAesEncrypt(password: string, strength: 1 | 2 | 3, plain: Uint8Array): Uint8Array {
+  const keyLen = { 1: 16, 2: 24, 3: 32 }[strength]
+  const salt = randomBytes({ 1: 8, 2: 12, 3: 16 }[strength])
+  const dk = pbkdf2Sync(password, salt, 1000, 2 * keyLen + 2, 'sha1')
+  const ecb = createCipheriv(`aes-${keyLen * 8}-ecb`, dk.subarray(0, keyLen), null)
+  ecb.setAutoPadding(false)
+  const enc = Buffer.alloc(plain.length)
+  const counter = Buffer.alloc(16)
+  for (let i = 0; i < plain.length; i += 16) {
+    counter.writeBigUInt64LE(BigInt(i / 16 + 1))
+    const ks = ecb.update(counter)
+    for (let j = 0; j < 16 && i + j < plain.length; j++) enc[i + j] = plain[i + j] ^ ks[j]
+  }
+  const mac = createHmac('sha1', dk.subarray(keyLen, 2 * keyLen)).update(enc).digest().subarray(0, 10)
+  return Buffer.concat([salt, dk.subarray(2 * keyLen), enc, mac])
+}
 
 function makeZip(entries: ZipEntry[], zip64 = false): Uint8Array<ArrayBuffer> {
   const parts: Uint8Array[] = []
@@ -257,48 +394,72 @@ function makeZip(entries: ZipEntry[], zip64 = false): Uint8Array<ArrayBuffer> {
   const enc = new TextEncoder()
   for (const e of entries) {
     const name = enc.encode(e.name)
-    const body = e.compressed ?? e.data
     const crc = CRC32(e.data)
-    const localExtra = zip64 ? 20 : 0
-    const local = new DataView(new ArrayBuffer(30 + name.length + localExtra))
+    let body = e.compressed ?? e.data
+    let method = e.method
+    let flags = (e.flags ?? 0) | 0x800
+    let storedCrc = crc
+    const aesExtra: number[] = []
+    if (e.encrypt) {
+      flags |= 1
+      if (e.encrypt.aes) {
+        body = winZipAesEncrypt(e.encrypt.password, e.encrypt.aes, body)
+        aesExtra.push(0x01, 0x99, 7, 0, e.encrypt.ae2 ? 2 : 1, 0, 0x41, 0x45, e.encrypt.aes, method & 0xff, method >> 8)
+        method = 99
+        if (e.encrypt.ae2) storedCrc = 0
+      } else {
+        if (e.encrypt.descriptor) flags |= 8
+        body = zipCryptoEncrypt(e.encrypt.password, body, e.encrypt.descriptor ? (DOS_TIME >> 8) & 0xff : crc >>> 24)
+      }
+    }
+    const z64Local = zip64 ? 20 : 0
+    const z64Central = zip64 ? 28 : 0
+    const local = new DataView(new ArrayBuffer(30 + name.length + z64Local + aesExtra.length))
     local.setUint32(0, 0x04034b50, true)
     local.setUint16(4, zip64 ? 45 : 20, true)
-    local.setUint16(6, (e.flags ?? 0) | 0x800, true)
-    local.setUint16(8, e.method, true)
-    local.setUint32(14, crc, true)
+    local.setUint16(6, flags, true)
+    local.setUint16(8, method, true)
+    local.setUint16(10, DOS_TIME, true)
+    local.setUint32(14, storedCrc, true)
     local.setUint32(18, zip64 ? 0xffffffff : body.length, true)
     local.setUint32(22, zip64 ? 0xffffffff : e.data.length, true)
     local.setUint16(26, name.length, true)
-    local.setUint16(28, localExtra, true)
+    local.setUint16(28, z64Local + aesExtra.length, true)
     new Uint8Array(local.buffer).set(name, 30)
+    let x = 30 + name.length
     if (zip64) {
-      local.setUint16(30 + name.length, 1, true)
-      local.setUint16(32 + name.length, 16, true)
-      local.setBigUint64(34 + name.length, BigInt(e.data.length), true)
-      local.setBigUint64(42 + name.length, BigInt(body.length), true)
+      local.setUint16(x, 1, true)
+      local.setUint16(x + 2, 16, true)
+      local.setBigUint64(x + 4, BigInt(e.data.length), true)
+      local.setBigUint64(x + 12, BigInt(body.length), true)
+      x += 20
     }
-    const centralExtra = zip64 ? 28 : 0
-    const cd = new DataView(new ArrayBuffer(46 + name.length + centralExtra))
+    new Uint8Array(local.buffer).set(aesExtra, x)
+
+    const cd = new DataView(new ArrayBuffer(46 + name.length + z64Central + aesExtra.length))
     cd.setUint32(0, 0x02014b50, true)
     cd.setUint16(4, 45, true)
     cd.setUint16(6, zip64 ? 45 : 20, true)
-    cd.setUint16(8, (e.flags ?? 0) | 0x800, true)
-    cd.setUint16(10, e.method, true)
-    cd.setUint32(16, crc, true)
+    cd.setUint16(8, flags, true)
+    cd.setUint16(10, method, true)
+    cd.setUint16(12, DOS_TIME, true)
+    cd.setUint32(16, storedCrc, true)
     cd.setUint32(20, zip64 ? 0xffffffff : body.length, true)
     cd.setUint32(24, zip64 ? 0xffffffff : e.data.length, true)
     cd.setUint16(28, name.length, true)
-    cd.setUint16(30, centralExtra, true)
+    cd.setUint16(30, z64Central + aesExtra.length, true)
     cd.setUint32(42, zip64 ? 0xffffffff : offset, true)
     new Uint8Array(cd.buffer).set(name, 46)
+    x = 46 + name.length
     if (zip64) {
-      const x = 46 + name.length
       cd.setUint16(x, 1, true)
       cd.setUint16(x + 2, 24, true)
       cd.setBigUint64(x + 4, BigInt(e.data.length), true)
       cd.setBigUint64(x + 12, BigInt(body.length), true)
       cd.setBigUint64(x + 20, BigInt(offset), true)
+      x += 28
     }
+    new Uint8Array(cd.buffer).set(aesExtra, x)
     parts.push(new Uint8Array(local.buffer), body)
     central.push(new Uint8Array(cd.buffer))
     offset += local.byteLength + body.length

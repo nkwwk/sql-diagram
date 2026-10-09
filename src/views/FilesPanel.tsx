@@ -32,6 +32,7 @@ export default function FilesPanel({ files, reports, onRemove, onAdd, compact }:
                   <div className="muted small">
                     {formatBytes(f.size)}
                     {r && !r.skipped && r.format ? ` · ${formatLabel(r)} → ${formatBytes(r.textBytes)}` : ''}
+                    {r?.encrypted ? ' · protected' : ''}
                     {r?.skipped
                       ? ` · skipped: ${r.skipped}`
                       : r
@@ -74,6 +75,11 @@ export default function FilesPanel({ files, reports, onRemove, onAdd, compact }:
                       </span>
                     )}
                     {r && !r.skipped && r.encoding !== 'utf-8' && <span className="pill pill--soft">{r.encoding}</span>}
+                    {r?.encrypted && (
+                      <span className="pill pill--soft" title="Decrypted with a password; not saved for the next visit">
+                        protected
+                      </span>
+                    )}
                     {r?.skipped && <span className="pill pill--warn" title={r.skipped}>skipped</span>}
                   </td>
                   <td className="num">{formatBytes(f.size)}</td>

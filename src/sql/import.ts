@@ -1,6 +1,6 @@
 import { SchemaBuilder } from './parser'
 import { StatementScanner, type ScanStats } from './scanner'
-import { ArchiveError, openEntries, type Entry, type Format } from './archive/archive'
+import { ArchiveError, openEntries, type Entry, type Format, type PasswordRequest } from './archive/archive'
 import type { Schema } from './types'
 
 export interface FileReport extends ScanStats {
@@ -20,6 +20,8 @@ export interface FileReport extends ScanStats {
   textBytes: number
   /** Set when the file was skipped (e.g. it is not a text file). */
   skipped?: string
+  /** Some content was password-protected and decrypted. */
+  encrypted?: boolean
 }
 
 export interface ImportProgress {
@@ -35,7 +37,11 @@ export interface ImportResult {
   files: FileReport[]
   /** The DDL statements kept from each file — small enough to persist and re-import. */
   ddl: string[]
+  /** True when any content was decrypted with a password; callers should not persist it. */
+  sensitive: boolean
 }
+
+export type { PasswordRequest }
 
 const LAYER_NAMES: Record<Format, string> = { gzip: 'gzip', bzip2: 'bzip2', xz: 'xz', zstd: 'zstd', zip: 'zip', tar: 'tar', text: 'text' }
 
@@ -97,8 +103,26 @@ async function scanEntry(entry: Entry, onStatement: (stmt: string) => void): Pro
  * scanner and build a single schema. Only DDL text is retained, so memory stays
  * flat regardless of how much INSERT / COPY data the dumps contain.
  */
-export async function importFiles(files: Blob[], onProgress?: (p: ImportProgress) => void): Promise<ImportResult> {
+export async function importFiles(
+  files: Blob[],
+  onProgress?: (p: ImportProgress) => void,
+  requestPassword?: (request: PasswordRequest) => Promise<string | null>,
+): Promise<ImportResult> {
   const builder = new SchemaBuilder()
+  // Passwords that worked are tried first for later archives, so a shared password is asked once.
+  // Time spent waiting for the user is excluded from parse times.
+  let waited = 0
+  const ask =
+    requestPassword &&
+    (async (request: PasswordRequest) => {
+      const t = performance.now()
+      try {
+        return await requestPassword(request)
+      } finally {
+        waited += performance.now() - t
+      }
+    })
+  const passwords = { known: [] as string[], ask }
   const reports: FileReport[] = []
   const ddl: string[] = []
   const notes: string[] = []
@@ -107,6 +131,7 @@ export async function importFiles(files: Blob[], onProgress?: (p: ImportProgress
     const file = files[fileIndex]
     const name = file instanceof File ? file.name : `file-${fileIndex + 1}.sql`
     const started = performance.now()
+    const waitedBefore = waited
     const kept: string[] = []
     const report: FileReport = {
       name,
@@ -132,6 +157,8 @@ export async function importFiles(files: Blob[], onProgress?: (p: ImportProgress
           onProgress?.({ fileIndex, fileCount: files.length, name, loaded, total: file.size })
         },
         onNote: (m) => fileNotes.push(m),
+        passwords,
+        onDecrypt: () => (report.encrypted = true),
       })
       for await (const entry of entries) {
         // Describe the upload's own layers, up to and including any archive container.
@@ -167,12 +194,12 @@ export async function importFiles(files: Blob[], onProgress?: (p: ImportProgress
 
     if (report.skipped) notes.push(`Skipped "${name}": ${report.skipped}.`)
     notes.push(...fileNotes)
-    report.ms = performance.now() - started
+    report.ms = performance.now() - started - (waited - waitedBefore)
     reports.push(report)
     ddl.push(kept.join(';\n\n') + (kept.length ? ';\n' : ''))
   }
 
   const schema = builder.build()
   schema.warnings.unshift(...notes)
-  return { schema, files: reports, ddl }
+  return { schema, files: reports, ddl, sensitive: reports.some((r) => r.encrypted) }
 }

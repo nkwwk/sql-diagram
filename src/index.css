@@ -1429,3 +1429,49 @@ table.grid .arrow {
 .erd--large .erd-table.is-active {
   box-shadow: 0 0 0 2px var(--edge-active);
 }
+
+/* ---------- password prompt ---------- */
+
+.modal--compact {
+  width: min(440px, 100%);
+}
+.modal--compact p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.pw-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pw-title svg {
+  stroke: var(--accent);
+  stroke-width: 1.8;
+  fill: var(--accent-soft);
+}
+.field {
+  display: grid;
+  gap: 6px;
+  font-weight: 500;
+}
+.field input {
+  border: 1px solid var(--border-strong);
+  background: var(--canvas);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-weight: 400;
+}
+.field input[aria-invalid='true'] {
+  border-color: var(--warn);
+}
+.form-error {
+  color: var(--warn);
+  font-size: 13px;
+}
+@media (max-width: 640px) {
+  .modal.modal--compact {
+    height: auto;
+    border-radius: 16px 16px 0 0;
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+  }
+}

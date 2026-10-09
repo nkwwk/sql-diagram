@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ImportProgress, ImportResult } from './sql/import'
+import type { ImportProgress, ImportResult, PasswordRequest } from './sql/import'
 import type { WorkerRequest, WorkerResponse } from './sql/import.worker'
 
 const STORAGE_KEY = 'sql-diagram:files'
@@ -23,7 +23,8 @@ function loadSaved(): File[] {
 
 function save(result: ImportResult | null) {
   try {
-    if (!result) {
+    // Never write schemas decrypted from password-protected files to storage.
+    if (!result || result.sensitive) {
       localStorage.removeItem(STORAGE_KEY)
       return
     }
@@ -47,7 +48,9 @@ export function useImport() {
   const [progress, setProgress] = useState<ImportProgress | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(() => files.length > 0)
+  const [passwordRequest, setPasswordRequest] = useState<(PasswordRequest & { requestId: number }) | null>(null)
   const firstRun = useRef(true)
+  const active = useRef<{ worker: Worker; id: number } | null>(null)
 
   useEffect(() => {
     const restoring = firstRun.current
@@ -58,10 +61,12 @@ export function useImport() {
     }
     const id = ++requestId
     const worker = new Worker(new URL('./sql/import.worker.ts', import.meta.url), { type: 'module' })
+    active.current = { worker, id }
     worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
       const msg = e.data
       if (msg.id !== id) return
       if (msg.type === 'progress') setProgress(msg.progress)
+      else if (msg.type === 'password') setPasswordRequest({ ...msg.request, requestId: msg.requestId })
       else if (msg.type === 'done') {
         setResult(msg.result)
         setBusy(false)
@@ -78,12 +83,28 @@ export function useImport() {
       setError(e.message || 'The parser crashed.')
       setBusy(false)
     }
-    worker.postMessage({ id, files } satisfies WorkerRequest)
-    return () => worker.terminate()
+    worker.postMessage({ type: 'import', id, files } satisfies WorkerRequest)
+    return () => {
+      worker.terminate()
+      if (active.current?.worker === worker) active.current = null
+    }
   }, [files])
+
+  /** Answers the pending password prompt; null skips the archive's encrypted files. */
+  const answerPassword = useCallback(
+    (password: string | null) => {
+      const current = active.current
+      if (current && passwordRequest) {
+        current.worker.postMessage({ type: 'password', id: current.id, requestId: passwordRequest.requestId, password } satisfies WorkerRequest)
+      }
+      setPasswordRequest(null)
+    },
+    [passwordRequest],
+  )
 
   const update = useCallback((next: File[]) => {
     setFiles(next)
+    setPasswordRequest(null)
     setBusy(next.length > 0)
     setProgress(null)
     setError(null)
@@ -101,5 +122,5 @@ export function useImport() {
   )
   const removeFile = useCallback((index: number) => update(files.filter((_, i) => i !== index)), [files, update])
 
-  return { files, result, progress, error, busy, replaceFiles, addFiles, removeFile }
+  return { files, result, progress, error, busy, replaceFiles, addFiles, removeFile, passwordRequest, answerPassword }
 }

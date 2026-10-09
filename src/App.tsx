@@ -10,6 +10,7 @@ import { useImport } from './useImport'
 import { formatBytes } from './util/format'
 import { useIsNarrow, useIsTouch } from './util/useMediaQuery'
 import Menu from './components/Menu'
+import PasswordPrompt from './components/PasswordPrompt'
 
 const TABS = [
   { id: 'erd', label: 'ER diagram', short: 'ERD' },
@@ -28,7 +29,7 @@ type Panel = 'files' | 'warnings' | null
 let pasteCount = 0
 
 export default function App() {
-  const { files, result, progress, error, busy, replaceFiles, addFiles, removeFile } = useImport()
+  const { files, result, progress, error, busy, replaceFiles, addFiles, removeFile, passwordRequest, answerPassword } = useImport()
   const [tab, setTab] = useState<TabId>('erd')
   const [pasteOpen, setPasteOpen] = useState(false)
   const [draft, setDraft] = useState('')
@@ -104,6 +105,8 @@ export default function App() {
   const togglePanel = (p: Panel) => setPanel((cur) => (cur === p ? null : p))
 
   const columnCount = schema?.tables.reduce((n, t) => n + t.columns.length, 0) ?? 0
+  const skippedFiles = result?.files.filter((f) => f.skipped) ?? []
+  const allSkipped = hasFiles && !busy && skippedFiles.length > 0 && skippedFiles.length === result?.files.length
   const empty = !schema || schema.tables.length === 0
   const pct = progress && progress.total ? Math.round((progress.loaded / progress.total) * 100) : 0
 
@@ -193,7 +196,9 @@ export default function App() {
         <div className="progress" role="status">
           <div className="progress__bar" style={{ width: `${progress ? pct : 2}%` }} />
           <span className="progress__text">
-            {progress
+            {passwordRequest
+              ? 'Waiting for password…'
+              : progress
               ? `${narrow ? '' : `Parsing ${progress.name}`}${progress.fileCount > 1 ? ` (${progress.fileIndex + 1}/${progress.fileCount})` : ''}${narrow ? '' : ' — '}${pct}% · ${formatBytes(progress.loaded)} of ${formatBytes(progress.total)}`
               : 'Parsing…'}
           </span>
@@ -231,6 +236,15 @@ export default function App() {
                 <h1>Reading {files.length === 1 ? files[0].name : `${files.length} files`}…</h1>
                 <p>Large dumps are streamed, so INSERT and COPY data is skipped without being loaded into memory.</p>
               </>
+            ) : allSkipped ? (
+              <>
+                <h1>Nothing could be read</h1>
+                {skippedFiles.slice(0, 3).map((f) => (
+                  <p key={f.name}>
+                    <span className="mono strong">{f.name}</span> was skipped: {f.skipped}.
+                  </p>
+                ))}
+              </>
             ) : (
               <>
                 <h1>{hasFiles ? 'No tables found' : touch ? 'Open .sql files' : 'Drop .sql files here'}</h1>
@@ -246,6 +260,7 @@ export default function App() {
               </>
             )}
             <div className="empty-actions" onClick={(e) => e.stopPropagation()}>
+              {allSkipped && <button onClick={() => replaceFiles([...files])}>Try again</button>}
               <button className="primary" onClick={() => openInput.current?.click()}>Choose files</button>
               {touch && <button onClick={openPaste}>Paste SQL</button>}
               <button onClick={loadSample}>Try the sample schema</button>
@@ -328,6 +343,11 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {passwordRequest && (
+        // Keyed per request so each prompt (e.g. after a wrong password) starts empty.
+        <PasswordPrompt key={passwordRequest.requestId} request={passwordRequest} onSubmit={(pw) => answerPassword(pw)} onSkip={() => answerPassword(null)} />
       )}
 
       {dragging && (
